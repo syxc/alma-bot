@@ -356,6 +356,31 @@ async function handleMessage(msg) {
     lastMessageTime.set(userId, now);
     lastInteractionTime.set(userId, now); // 记录互动时间，用于主动交互
 
+    // 评估是否需要继续对话，增加自然的对话延续
+    setTimeout(async () => {
+      try {
+        // 根据对话内容决定是否继续话题
+        const shouldContinue = await shouldContinueConversation(userId, userMessage, reply);
+        if (shouldContinue) {
+          const continuationMessage = await generateContinuationMessage(userId, userMessage, reply);
+          if (continuationMessage) {
+            await bot.sendMessage(userId, continuationMessage);
+
+            // 保存延续消息到对话历史
+            await memory.add(userId, 'assistant', continuationMessage);
+
+            // 更新时间戳
+            lastMessageTime.set(userId, Date.now());
+            lastInteractionTime.set(userId, Date.now());
+
+            console.log(`[对话延续] 发送给用户 ${userId}: ${continuationMessage.substring(0, 20)}...`);
+          }
+        }
+      } catch (error) {
+        console.error(`对话延续处理失败 (用户 ${userId}):`, error.message);
+      }
+    }, 3000); // 3秒后发送延续消息，模拟自然的停顿
+
     // 偶尔提取重要信息（每 10 条对话左右）
     if (memory.getChatCount(userId) % 10 === 0) {
       // 使用setTimeout来避免阻塞主流程，但仍然处理异步操作
@@ -388,6 +413,128 @@ async function handleMessage(msg) {
     } catch (sendErr) {
       console.error('发送错误回复失败:', sendErr.message);
     }
+  }
+}
+
+/**
+ * 判断是否需要继续对话
+ */
+async function shouldContinueConversation(userId, userMessage, assistantReply) {
+  try {
+    // 获取用户的重要信息和对话历史
+    const importantFacts = memory.getImportantFacts(userId);
+    const recentMood = memory.getRecentMood(userId);
+    const chatCount = memory.getChatCount(userId);
+
+    // 基于一些启发式规则判断是否继续对话
+    // 1. 如果是简单问答，可能不需要继续
+    // 2. 如果涉及用户感兴趣的话题，可以继续
+    // 3. 如果用户表达了情感，可以继续关心
+
+    // 简单的启发式规则
+    const simpleResponses = ['嗯', '哦', '好', '知道了', '是的', '不是', '对', '不对'];
+    const isSimpleResponse = simpleResponses.some((response) =>
+      assistantReply.trim().toLowerCase().includes(response.toLowerCase()),
+    );
+
+    // 如果回复过于简单，可能不继续
+    if (isSimpleResponse && assistantReply.length < 10) {
+      return false;
+    }
+
+    // 如果用户表达了情感或提到了个人情况，可以继续
+    const emotionalWords = ['开心', '难过', '生气', '累', '忙', '压力', '工作', '生活', '朋友', '家人', '今天', '感觉'];
+    const hasEmotionalContent = emotionalWords.some(
+      (word) =>
+        userMessage.toLowerCase().includes(word.toLowerCase()) ||
+        assistantReply.toLowerCase().includes(word.toLowerCase()),
+    );
+
+    // 如果有情感内容，更倾向于继续
+    if (hasEmotionalContent) {
+      return Math.random() > 0.3; // 70%概率继续
+    }
+
+    // 如果是初次对话或很久没聊，可以继续建立关系
+    if (chatCount < 5 || (chatCount > 20 && Math.random() > 0.5)) {
+      return true;
+    }
+
+    // 一般情况下，随机决定是否继续（30%概率）
+    return Math.random() > 0.7;
+  } catch (error) {
+    console.error(`判断是否继续对话失败 (用户 ${userId}):`, error.message);
+    return false; // 出错时默认不继续
+  }
+}
+
+/**
+ * 生成对话延续消息
+ */
+async function generateContinuationMessage(userId, userMessage, assistantReply) {
+  try {
+    const userName = userNames.get(userId) || '朋友';
+    const importantFacts = memory.getImportantFacts(userId);
+    const recentMood = memory.getRecentMood(userId);
+    const chatCount = memory.getChatCount(userId);
+
+    // 构建延续对话的提示
+    let prompt = `你是 Rose。你刚刚和${userName}进行了如下对话：
+
+用户说：${userMessage}
+你回复：${assistantReply}
+
+当前时间信息：${getCurrentMood()}
+
+你想要继续这个对话，可以是对刚才话题的深入、转换话题、分享自己的经历或提出问题。请生成一条自然的延续对话消息，让对话更生动有趣。`;
+
+    if (importantFacts.length > 0) {
+      prompt += `\n\n你记得关于Ta的事：${importantFacts.slice(0, 3).join(', ')}`;
+      prompt += `\n\n可以根据这些信息来延续对话。`;
+    }
+
+    if (recentMood) {
+      prompt += `\n\nTa上次聊天的心情：${recentMood}`;
+    }
+
+    prompt += `\n\n你们已经聊过${chatCount}次了。`;
+
+    const continuationMessage = await chatWithLLM([
+      {
+        role: 'system',
+        content: buildSystemPrompt({
+          userName,
+          importantFacts,
+          chatCount,
+          mood: getCurrentMood() + (recentMood ? `，上次对话心情: ${recentMood}` : ''),
+        }),
+      },
+      { role: 'user', content: prompt },
+    ]);
+
+    // 确保返回的是合理的延续消息
+    if (continuationMessage && continuationMessage.trim().length > 0) {
+      return continuationMessage.trim();
+    } else {
+      // 默认的延续消息
+      const defaultContinuations = [
+        `对了，顺便问一下，你最近怎么样？`,
+        `想起来，你之前说过…（忘记了具体内容），最近有进展吗？`,
+        `说起来，我今天遇到了件有趣的事…`,
+        `你觉得呢？我很想听听你的看法。`,
+        `哈哈，聊着聊着就想起了以前的事。`,
+      ];
+      return defaultContinuations[Math.floor(Math.random() * defaultContinuations.length)];
+    }
+  } catch (error) {
+    console.error(`生成对话延续消息失败 (用户 ${userId}):`, error.message);
+    // 返回默认的延续消息
+    const defaultContinuations = [
+      `对了，顺便问一下，你最近怎么样？`,
+      `想起来，你之前说过…（忘记了具体内容），最近有进展吗？`,
+      `哈哈，聊着聊着就想起了以前的事。`,
+    ];
+    return defaultContinuations[Math.floor(Math.random() * defaultContinuations.length)];
   }
 }
 
