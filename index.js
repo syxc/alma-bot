@@ -58,6 +58,7 @@ async function chatWithLLM(messages) {
       console.error('API 返回空内容:', JSON.stringify(response.data, null, 2));
       throw new Error('API 返回空内容');
     }
+
     return content;
   } catch (err) {
     console.error('DeepSeek API 错误:', err.response?.data || err.message);
@@ -69,7 +70,10 @@ async function chatWithLLM(messages) {
  * 提取对话中的重要信息
  */
 async function extractImportantFacts(userId) {
-  const messages = memory.getAll(userId).slice(-20);
+  const lastMessages = memory.getAll(userId).slice(-20);
+  if (lastMessages.length === 0) return [];
+
+  const messages = lastMessages;
 
   if (messages.length < 2) return [];
 
@@ -83,7 +87,9 @@ async function extractImportantFacts(userId) {
       { role: 'user', content: prompt },
     ]);
 
-    if (!result || result === '无') return [];
+    if (!result || result === '无') {
+      return [];
+    }
 
     const facts = result
       .split('\n')
@@ -205,7 +211,7 @@ async function handleMessage(msg) {
   }
 
   try {
-    bot.sendChatAction(userId, 'typing');
+    await bot.sendChatAction(userId, 'typing');
 
     // 构建消息
     const messages = buildMessages(userId, userMessage);
@@ -215,7 +221,7 @@ async function handleMessage(msg) {
 
     if (!reply || reply.trim().length === 0) {
       console.error('LLM 返回空内容');
-      bot.sendMessage(userId, '嗯...');
+      await bot.sendMessage(userId, '嗯...');
       return;
     }
 
@@ -243,11 +249,15 @@ async function handleMessage(msg) {
 
     console.log(`[${userName || userId}] ${userMessage.substring(0, 20)}... -> OK`);
   } catch (err) {
-    console.error('处理消息失败:', err.message);
+    console.error('处理消息失败:', err);
 
     // 自然的人类式回复
     const naturalReplies = ['刚才卡住了，你说啥？', '没听清，再说一遍？', '有点走神了...', '信号不好吗，我没收到'];
-    bot.sendMessage(userId, naturalReplies[Math.floor(Math.random() * naturalReplies.length)]);
+    try {
+      await bot.sendMessage(userId, naturalReplies[Math.floor(Math.random() * naturalReplies.length)]);
+    } catch (sendErr) {
+      console.error('发送错误回复失败:', sendErr.message);
+    }
   }
 }
 
