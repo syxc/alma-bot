@@ -34,6 +34,12 @@ const lastMessageTime = new Map();
 // 用户名存储
 const userNames = new Map();
 
+// 主动交互相关
+const lastInteractionTime = new Map(); // 记录最后互动时间
+const lastActiveMessageTime = new Map(); // 记录主动消息发送时间
+const USER_INACTIVE_THRESHOLD = 30 * 60 * 1000; // 30分钟无互动后可主动发起对话
+const ACTIVE_MESSAGE_INTERVAL = 2 * 60 * 60 * 1000; // 主动消息间隔：2小时
+
 // 内存管理：定期清理旧的用户数据，防止内存泄漏
 setInterval(
   () => {
@@ -346,7 +352,9 @@ async function handleMessage(msg) {
     await memory.add(userId, 'assistant', reply);
 
     // 更新最后消息时间
-    lastMessageTime.set(userId, Date.now());
+    const now = Date.now();
+    lastMessageTime.set(userId, now);
+    lastInteractionTime.set(userId, now); // 记录互动时间，用于主动交互
 
     // 偶尔提取重要信息（每 10 条对话左右）
     if (memory.getChatCount(userId) % 10 === 0) {
@@ -382,6 +390,102 @@ async function handleMessage(msg) {
     }
   }
 }
+
+/**
+ * 生成主动消息
+ */
+async function generateActiveMessage(userId) {
+  try {
+    const userName = userNames.get(userId) || '朋友';
+    const importantFacts = memory.getImportantFacts(userId);
+    const recentMood = memory.getRecentMood(userId);
+    const chatCount = memory.getChatCount(userId);
+
+    // 根据用户信息生成个性化的主动消息
+    let prompt = `你是 Rose。现在主动联系${userName}聊天。
+
+当前时间信息：${getCurrentMood()}`;
+
+    if (importantFacts.length > 0) {
+      prompt += `\n\n你记得关于Ta的事：${importantFacts.slice(0, 3).join(', ')}`;
+    }
+
+    if (recentMood) {
+      prompt += `\n\nTa上次聊天的心情：${recentMood}`;
+    }
+
+    if (chatCount > 0) {
+      prompt += `\n\n你们已经聊过${chatCount}次了`;
+    }
+
+    prompt += `
+
+请生成一条自然、主动的打招呼消息，可以是问候、关心、分享日常或提出话题。语气自然，就像真人朋友一样。`;
+
+    const activeMessage = await chatWithLLM([
+      { role: 'system', content: buildSystemPrompt({ userName, importantFacts, chatCount }) },
+      { role: 'user', content: prompt },
+    ]);
+
+    // 确保返回的是合理的消息
+    if (activeMessage && activeMessage.trim().length > 0) {
+      return activeMessage.trim();
+    } else {
+      // 默认的主动消息
+      const defaultMessages = [
+        `嘿，最近在忙啥呢？`,
+        `好久没聊了，最近怎么样？`,
+        `刚想到你，最近还好吗？`,
+        `有啥新鲜事儿不？`,
+        `刚才看到个有趣的事，想跟你聊聊`,
+      ];
+      return defaultMessages[Math.floor(Math.random() * defaultMessages.length)];
+    }
+  } catch (error) {
+    console.error(`生成主动消息失败 (用户 ${userId}):`, error.message);
+    // 返回默认的主动消息
+    const defaultMessages = [`嘿，最近在忙啥呢？`, `好久没聊了，最近怎么样？`, `刚想到你，最近还好吗？`];
+    return defaultMessages[Math.floor(Math.random() * defaultMessages.length)];
+  }
+}
+
+/**
+ * 主动发起对话
+ */
+async function initiateActiveConversation() {
+  try {
+    const userIds = memory.getUserIds();
+
+    for (const userId of userIds) {
+      const lastInteraction = lastInteractionTime.get(userId) || 0;
+      const lastActiveMsg = lastActiveMessageTime.get(userId) || 0;
+      const now = Date.now();
+
+      // 检查是否满足主动发起对话的条件
+      if (now - lastInteraction > USER_INACTIVE_THRESHOLD && now - lastActiveMsg > ACTIVE_MESSAGE_INTERVAL) {
+        try {
+          // 生成主动消息
+          const activeMessage = await generateActiveMessage(userId);
+
+          // 发送主动消息
+          await bot.sendMessage(userId, activeMessage);
+
+          // 更新主动消息发送时间
+          lastActiveMessageTime.set(userId, now);
+
+          console.log(`[主动消息] 发送给用户 ${userId}: ${activeMessage.substring(0, 20)}...`);
+        } catch (sendError) {
+          console.error(`发送主动消息失败 (用户 ${userId}):`, sendError.message);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('主动对话发起失败:', error.message);
+  }
+}
+
+// 设置定时任务，每隔一段时间检查是否需要主动发起对话
+setInterval(initiateActiveConversation, 10 * 60 * 1000); // 每10分钟检查一次
 
 /**
  * 命令处理
@@ -427,6 +531,8 @@ async function handleCommand(msg) {
         await memory.clear(userId);
         lastMessageTime.delete(userId);
         userNames.delete(userId);
+        lastInteractionTime.delete(userId); // 清除互动时间记录
+        lastActiveMessageTime.delete(userId); // 清除主动消息时间记录
         await bot.sendMessage(userId, '行，重新开始吧。');
         break;
 
@@ -464,6 +570,12 @@ ${limitedMessages.map((m) => `${m.role === 'user' ? 'Ta' : '我'}: ${m.content}`
       await bot.sendMessage(userId, '命令处理出错了...');
     } catch (sendErr) {
       console.error('发送错误消息失败:', sendErr.message);
+    }
+  } finally {
+    // 记录互动时间，用于主动交互
+    if (userId) {
+      const now = Date.now();
+      lastInteractionTime.set(userId, now);
     }
   }
 }
