@@ -267,9 +267,9 @@ function buildMessages(userId, userMessage) {
     return messages;
   } catch (error) {
     console.error(`构建消息失败 (用户 ${userId}):`, error.message);
-    // 返回最小可行的消息结构
+    // 返回最小可行的消息结构，确保buildSystemPrompt被正确调用
     return [
-      { role: 'system', content: buildSystemPrompt() },
+      { role: 'system', content: buildSystemPrompt({}) },
       { role: 'user', content: userMessage },
     ];
   }
@@ -350,15 +350,24 @@ async function handleMessage(msg) {
 
     // 偶尔提取重要信息（每 10 条对话左右）
     if (memory.getChatCount(userId) % 10 === 0) {
-      extractImportantFacts(userId).catch((err) => {
-        console.error('提取重要信息失败:', err.message);
-      });
+      // 使用setTimeout来避免阻塞主流程，但仍然处理异步操作
+      setTimeout(async () => {
+        try {
+          await extractImportantFacts(userId);
+        } catch (err) {
+          console.error('提取重要信息失败:', err.message);
+        }
+      }, 0);
     }
 
     // 分析并记录情绪
-    analyzeAndSaveMood(userId, userMessage, reply).catch((err) => {
-      console.error('分析情绪失败:', err.message);
-    });
+    setTimeout(async () => {
+      try {
+        await analyzeAndSaveMood(userId, userMessage, reply);
+      } catch (err) {
+        console.error('分析情绪失败:', err.message);
+      }
+    }, 0);
 
     console.log(`[${userName || userId}] ${userMessage.substring(0, 20)}... -> OK`);
   } catch (err) {
